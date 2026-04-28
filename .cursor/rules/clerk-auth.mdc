@@ -1,0 +1,59 @@
+---
+alwaysApply: true
+---
+# Authentication and Authorization with Clerk
+
+All authentication in this project is handled by [Clerk](https://clerk.com) via [@clerk/nextjs](https://clerk.com/docs/references/nextjs/overview). The current user is the single source of truth for who is allowed to access what data. Every code path that reads or writes user-owned data MUST verify the caller's Clerk identity and scope the operation to that user.
+
+## Authentication rules
+
+- Use Clerk helpers to identify the current user. Never roll your own auth, never trust a `userId` that came from the client (request body, query params, headers, cookies, props).
+  - Server Components, Route Handlers, and Server Actions: import `auth` from `@clerk/nextjs/server` and call `const { userId } = await auth();`.
+  - Client Components: use `useUser()` / `useAuth()` from `@clerk/nextjs` for UI state only — never use a client-derived id as the authorization key for a database query.
+- If `userId` is `null`/`undefined`, treat the request as unauthenticated:
+  - In Server Actions and Route Handlers, throw or return an unauthorized response immediately, before touching the database.
+  - In Server Components, redirect to sign-in (or render a signed-out state) instead of querying user data.
+- Protect routes via [middleware.ts](mdc:middleware.ts) using `clerkMiddleware` and `createRouteMatcher`. Mark only truly public routes as public; everything else must require an authenticated session.
+- Wrap signed-in / signed-out UI with Clerk's `<SignedIn>`, `<SignedOut>`, `<Show when="signed-in">`, etc. UI gating is not a substitute for server-side authorization — it is purely cosmetic.
+
+## Authorization rules (users can only access their own data)
+
+The schema in [db/schema.ts](mdc:db/schema.ts) ties ownership to the Clerk user via `decksTable.userId`. Cards are owned transitively through their parent deck (`cardsTable.deckId -> decksTable.id`). Every query must enforce this ownership.
+
+- Reads MUST filter by the authenticated `userId`:
+  ```ts
+  import { auth } from "@clerk/nextjs/server";
+  import { and, eq } from "drizzle-orm";
+  import { db } from "@/db";
+  import { decksTable } from "@/db/schema";
+
+  const { userId } = await auth();
+  if (!userId) throw new Error("Unauthorized");
+
+  const decks = await db
+    .select()
+    .from(decksTable)
+    .where(eq(decksTable.userId, userId));
+  ```
+- Fetching a single record by id MUST combine the id predicate with the ownership predicate in the same query — never fetch first and check ownership in JS:
+  ```ts
+  const deck = await db.query.decksTable.findFirst({
+    where: and(eq(decksTable.id, deckId), eq(decksTable.userId, userId)),
+  });
+  if (!deck) throw new Error("Not found"); // do not leak existence
+  ```
+- Writes MUST set/verify ownership server-side:
+  - `INSERT` into `decksTable`: always set `userId` from `auth()`, never from input.
+  - `UPDATE` / `DELETE` on `decksTable`: include `eq(decksTable.userId, userId)` in the `where` clause so a mismatched id affects zero rows.
+  - `INSERT` / `UPDATE` / `DELETE` on `cardsTable`: first confirm the parent deck belongs to the user (join on `decksTable` filtered by `userId`, or do a guarded `findFirst` on the deck), then perform the mutation. Never trust a `deckId` from the client without this check.
+- Do not return data belonging to other users in any shape — not in lists, not in counts, not in error messages, not in logs. Treat "record exists but belongs to someone else" the same as "record does not exist".
+- Do not accept `userId` (or any owner id) as an input parameter to Server Actions, Route Handlers, or API endpoints. Always derive it from `auth()` on the server.
+- When adding a new user-owned table to [db/schema.ts](mdc:db/schema.ts), include a `userId: varchar({ length: 255 }).notNull()` column (or a foreign key to a parent table that already has one) and apply all of the rules above to every query that touches it.
+
+## Review checklist before shipping any data access code
+
+1. Is `userId` obtained from `auth()` on the server (not from props, params, or the client)?
+2. Is the unauthenticated case handled before any DB call?
+3. Does every `select` / `update` / `delete` on a user-owned table include the ownership predicate?
+4. For child tables (e.g. `cardsTable`), is ownership verified through the parent deck on every mutation?
+5. Are "not found" and "not yours" indistinguishable to the caller?

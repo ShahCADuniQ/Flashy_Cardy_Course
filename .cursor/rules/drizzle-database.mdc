@@ -1,0 +1,24 @@
+---
+alwaysApply: true
+---
+# Database Interactions with Drizzle
+
+All database access in this project goes through [Drizzle ORM](https://orm.drizzle.team). The schema is defined in [db/schema.ts](mdc:db/schema.ts), the configured client is exported from [db/index.ts](mdc:db/index.ts), and migrations are configured via [drizzle.config.ts](mdc:drizzle.config.ts).
+
+## Rules
+
+- Always use the Drizzle client exported from [db/index.ts](mdc:db/index.ts):
+  ```ts
+  import { db } from "@/db";
+  ```
+- Always reference tables and relations from the schema in [db/schema.ts](mdc:db/schema.ts) (e.g. `decksTable`, `cardsTable`). Never hard-code table or column names as strings.
+- Build queries with Drizzle's query builder (`db.select`, `db.insert`, `db.update`, `db.delete`) or the relational query API (`db.query.*`). Use helpers from `drizzle-orm` (e.g. `eq`, `and`, `or`, `desc`) for predicates.
+- Do not use raw SQL (`sql`` `` template strings, `db.execute`, or any other driver) unless a query genuinely cannot be expressed with the Drizzle query builder. If raw SQL is required, still go through the Drizzle client.
+- Do not introduce other database clients or ORMs (e.g. `pg`, `postgres`, `kysely`, `prisma`). Drizzle is the single source of truth for DB access.
+- When the data model changes, update [db/schema.ts](mdc:db/schema.ts) first and generate migrations with Drizzle Kit rather than editing SQL by hand.
+
+## Adding new tables
+
+1. Define the table and any relations in [db/schema.ts](mdc:db/schema.ts) using `pgTable` and `relations` from `drizzle-orm`.
+2. Export the table so it can be imported by callers.
+3. Use the new table through the typed `db` client; do not write queries that bypass the schema.

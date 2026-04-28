@@ -1,0 +1,76 @@
+---
+alwaysApply: true
+---
+# Data Access, Mutations, and Validation
+
+This project enforces a strict separation between **data retrieval** and **data mutation**, and requires **Zod** for all validation of data crossing a trust boundary.
+
+## Data retrieval (reads)
+
+- All data retrieval MUST happen in **Server Components**. Fetch data directly inside `async` Server Components using the Drizzle client from [db/index.ts](mdc:db/index.ts) and the schema in [db/schema.ts](mdc:db/schema.ts).
+- Do NOT fetch data from Client Components (no `useEffect` + `fetch`, no SWR/React Query against your own DB, no client-side Drizzle calls).
+- Do NOT create Route Handlers (`app/api/**/route.ts`) just to read data for your own UI. Read in the Server Component instead.
+- Do NOT use Server Actions for plain reads. Server Actions are for mutations only.
+- Pass fetched data down to Client Components via props.
+
+## Data mutations (writes)
+
+- All `INSERT`, `UPDATE`, and `DELETE` operations MUST happen inside **Server Actions** (`"use server"` functions).
+- Server Actions live either:
+ - In a dedicated file with `"use server"` at the top (e.g. `app/**/actions.ts`), or
+ - Inline inside a Server Component using a function-level `"use server"` directive.
+- Client Components trigger mutations by importing and calling a Server Action — never by hitting a Route Handler or calling Drizzle directly.
+- Do NOT perform writes inside Server Components, Route Handlers, or `getServerSideProps`-style code. Writes go through Server Actions, period.
+- Every Server Action that touches user-owned data MUST follow the auth rules in [clerk-auth.mdc](mdc:.cursor/rules/clerk-auth.mdc) (derive `userId` from `auth()`, scope queries by ownership) and the DB rules in [drizzle-database.mdc](mdc:.cursor/rules/drizzle-database.mdc) (use the Drizzle client and schema).
+
+## Validation with Zod
+
+- All input to a Server Action MUST be validated with [Zod](https://zod.dev) before it is used — before any DB call, before any business logic, before any branching on its values.
+- Define a Zod schema for the input, infer the TypeScript type from it, and type the action's parameter with that inferred type. Do NOT type the parameter as `FormData`, `unknown`, `any`, or a hand-written interface that duplicates the schema.
+- Server Actions MUST accept a typed object argument, not `FormData`. If the call originates from a `<form action={...}>`, convert the `FormData` to a plain object in a thin Client Component wrapper (or read fields into an object in a Server Action wrapper) and pass the typed object into the validated action.
+- Use `schema.parse(input)` (throws on invalid input) or `schema.safeParse(input)` (returns a result) at the very top of the action. Use the parsed value for the rest of the action — never the raw input.
+- Validate on the server even if the same schema is used on the client. Client validation is UX; server validation is the security boundary.
+
+### Required shape for a Server Action
+
+```ts
+"use server";
+
+import { z } from "zod";
+import { auth } from "@clerk/nextjs/server";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/db";
+import { decksTable } from "@/db/schema";
+
+const updateDeckSchema = z.object({
+ deckId: z.number().int().positive(),
+ title: z.string().min(1).max(200),
+});
+
+type UpdateDeckInput = z.infer<typeof updateDeckSchema>;
+
+export async function updateDeck(input: UpdateDeckInput) {
+ const { userId } = await auth();
+ if (!userId) throw new Error("Unauthorized");
+
+ const { deckId, title } = updateDeckSchema.parse(input);
+
+ await db
+ .update(decksTable)
+ .set({ title })
+ .where(and(eq(decksTable.id, deckId), eq(decksTable.userId, userId)));
+}
+```
+
+Note that:
+- The parameter is typed as `UpdateDeckInput` (inferred from the schema), not `FormData`.
+- The schema is parsed before any DB call.
+- Auth and ownership are enforced per [clerk-auth.mdc](mdc:.cursor/rules/clerk-auth.mdc).
+
+## Review checklist
+
+1. Is every read in a Server Component (not a Client Component, not a Server Action, not a Route Handler created just for reading)?
+2. Is every write in a Server Action?
+3. Does every Server Action have a Zod schema that validates its input before any side effect?
+4. Is the action's parameter typed via `z.infer<typeof schema>` (and NOT typed as `FormData`)?
+5. Are auth and ownership enforced inside the action per [clerk-auth.mdc](mdc:.cursor/rules/clerk-auth.mdc)?

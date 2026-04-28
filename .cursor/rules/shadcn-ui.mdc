@@ -1,0 +1,40 @@
+---
+description: Generating front end UI's
+alwaysApply: false
+---
+# shadcn/ui Components
+
+This project uses [shadcn/ui](https://ui.shadcn.com) for all UI elements. The configuration lives in [components.json](mdc:components.json), and installed components are placed in [components/ui](mdc:components/ui).
+
+## Rules
+
+- Always prefer shadcn/ui components over building UI primitives from scratch.
+- Do not hand-write components that already exist in the shadcn registry (e.g. `button`, `input`, `dialog`, `card`, etc.) — install them instead.
+- Use the aliases defined in [components.json](mdc:components.json):
+  - UI components: `@/components/ui`
+  - Utilities: `@/lib/utils`
+  - Hooks: `@/hooks`
+
+## Initializing shadcn/ui
+
+If shadcn/ui has not yet been initialized in the project (i.e. `components.json` is missing), run:
+
+```bash
+npx shadcn@latest init
+```
+
+## Adding components
+
+Whenever a shadcn component is needed but not yet installed under [components/ui](mdc:components/ui), install it via the CLI before importing it. For example, to add the `button` component:
+
+```bash
+npx shadcn@latest add button
+```
+
+Replace `button` with the name of the component you need (e.g. `dialog`, `card`, `dropdown-menu`). Multiple components can be added in a single command:
+
+```bash
+npx shadcn@latest add button card dialog
+```
+
+After installation, import the component from `@/components/ui/<component-name>`.
