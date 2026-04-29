@@ -1,0 +1,162 @@
+---
+alwaysApply: true
+---
+# Billing and Plan/Feature Gating with Clerk
+
+All subscriptions, payments, and entitlement checks in this project are handled by [Clerk Billing](https://clerk.com/docs/billing/b2c-saas) via [@clerk/nextjs](https://clerk.com/docs/references/nextjs/overview). Clerk is the single source of truth for which plan a user is on and which features they have access to. Never roll your own subscription state, never store plan/feature flags in the application database, and never trust plan or feature information that came from the client.
+
+## Plans and features in this app
+
+This app is configured in the Clerk Dashboard with the following B2C plans and features. Use these exact slugs whenever you call `has()`, render `<Protect>`, or otherwise reference plans/features in code.
+
+### Plans
+
+- `free_user` — the default free plan.
+- `pro` — the paid plan.
+
+### Features
+
+- `3_deck_limit` — entitled to the free tier; user may create at most 3 decks.
+- `unlimited_deck` — entitled to the paid tier; user may create unlimited decks.
+- `ai_flash_card_generation` — entitled to the paid tier; user may use AI to generate flash cards.
+
+Do NOT invent new plan or feature slugs in code. If a new plan/feature is needed, it must first be created in the Clerk Dashboard and then referenced by its exact slug.
+
+## Server-side checks with `has()`
+
+For any server-side authorization decision (Server Components, Route Handlers, Server Actions), use the `has()` method from Clerk's `auth()` helper to check plans and features. `has()` is the security boundary — the answer it returns is the one that must drive any branching that gates content or mutations.
+
+```ts
+import { auth } from "@clerk/nextjs/server";
+
+const { userId, has } = await auth();
+if (!userId) throw new Error("Unauthorized");
+
+const hasPro = has({ plan: "pro" });
+const canUseAi = has({ feature: "ai_flash_card_generation" });
+const hasUnlimitedDecks = has({ feature: "unlimited_deck" });
+```
+
+Rules for `has()`:
+
+- Always derive `has` from `await auth()` on the server. Never accept a plan or feature flag as input from the client (request body, query params, headers, cookies, props).
+- Always check the unauthenticated case first (`if (!userId) ...`) before calling `has()` on user-scoped logic.
+- Use the exact plan/feature slugs listed above. Pass `plan: "..."` to check a plan and `feature: "..."` to check a feature — never both in the same call.
+
+## Component-level gating with `<Protect>`
+
+For gating UI in React components, use the [`<Protect>`](https://clerk.com/docs/components/protect) component from `@clerk/nextjs`. `<Protect>` is for cosmetic/UX gating only — it MUST always be paired with a corresponding server-side `has()` check before any mutation or sensitive read.
+
+Gate by plan:
+
+```tsx
+import { Protect } from "@clerk/nextjs";
+
+<Protect
+  plan="pro"
+  fallback={<p>Upgrade to Pro to access this feature.</p>}
+>
+  {/* Pro-only UI */}
+</Protect>;
+```
+
+Gate by feature:
+
+```tsx
+import { Protect } from "@clerk/nextjs";
+
+<Protect
+  feature="ai_flash_card_generation"
+  fallback={<p>Upgrade to Pro to generate flash cards with AI.</p>}
+>
+  {/* AI-only UI */}
+</Protect>;
+```
+
+Rules for `<Protect>`:
+
+- Use the exact plan/feature slugs listed above.
+- Always provide a `fallback` so signed-in users on a lower tier see a clear upgrade affordance instead of a blank space.
+- Treat `<Protect>` as UI gating only. The server MUST re-check entitlements with `has()` inside the Server Action or Server Component that performs the privileged operation. A user who bypasses the UI must still be blocked by the server.
+
+## Pricing page
+
+Render the pricing/upgrade UI with Clerk's [`<PricingTable />`](https://clerk.com/docs/components/pricing-table) component. Do not hand-roll a pricing UI or hard-code prices in the app — Clerk owns plan metadata.
+
+```tsx {{ filename: 'app/pricing/page.tsx' }}
+import { PricingTable } from "@clerk/nextjs";
+
+export default function Page() {
+  return (
+    <div style={{ maxWidth: "800px", margin: "0 auto", padding: "0 1rem" }}>
+      <PricingTable />
+    </div>
+  );
+}
+```
+
+## Enforcing entitlements on mutations
+
+Per [data-access.mdc](mdc:.cursor/rules/data-access.mdc), all writes go through Server Actions. Any Server Action that performs an action gated by a plan or feature MUST enforce the entitlement on the server with `has()` before doing any work, in addition to any UI-level `<Protect>` wrapping the trigger.
+
+The two gated mutations in this app are:
+
+1. Creating a new deck — gated by deck count vs. the user's deck-limit feature.
+   - If the user has `unlimited_deck`, allow creation with no count check.
+   - Otherwise the user is on the free tier (`3_deck_limit`); count their existing decks scoped by `userId` (per [clerk-auth.mdc](mdc:.cursor/rules/clerk-auth.mdc)) and reject the action if they already have 3 or more.
+2. Generating cards with AI — gated by `ai_flash_card_generation`.
+   - Reject the action if `has({ feature: "ai_flash_card_generation" })` is false.
+
+Example shape for an entitlement-gated Server Action:
+
+```ts
+"use server";
+
+import { z } from "zod";
+import { auth } from "@clerk/nextjs/server";
+import { and, count, eq } from "drizzle-orm";
+import { db } from "@/db";
+import { decksTable } from "@/db/schema";
+
+const createDeckSchema = z.object({
+  title: z.string().min(1).max(200),
+});
+
+type CreateDeckInput = z.infer<typeof createDeckSchema>;
+
+export async function createDeck(input: CreateDeckInput) {
+  const { userId, has } = await auth();
+  if (!userId) throw new Error("Unauthorized");
+
+  const { title } = createDeckSchema.parse(input);
+
+  if (!has({ feature: "unlimited_deck" })) {
+    const [{ value: deckCount }] = await db
+      .select({ value: count() })
+      .from(decksTable)
+      .where(eq(decksTable.userId, userId));
+
+    if (deckCount >= 3) {
+      throw new Error(
+        "Free plan is limited to 3 decks. Upgrade to Pro for unlimited decks.",
+      );
+    }
+  }
+
+  await db.insert(decksTable).values({ userId, title });
+}
+```
+
+Rules for entitlement enforcement:
+
+- Check entitlements with `has()` AFTER deriving `userId` and BEFORE any DB write or external side effect.
+- Do not store plan/feature state in the database as a cached flag. Always read it fresh from `auth()` so revocations and upgrades take effect immediately.
+- Surface a clear, user-facing error or upgrade message when an entitlement check fails — do not silently no-op.
+
+## Review checklist before shipping any billing-aware code
+
+1. Are plan and feature slugs spelled exactly as `free_user`, `pro`, `3_deck_limit`, `unlimited_deck`, or `ai_flash_card_generation` (no typos, no invented slugs)?
+2. Is every server-side gate using `has()` from `await auth()` (not props, not the client, not the database)?
+3. Is every UI `<Protect>` paired with a server-side `has()` check inside the Server Action / Server Component that actually performs the work?
+4. Does every entitlement-gated Server Action follow the auth and validation rules in [clerk-auth.mdc](mdc:.cursor/rules/clerk-auth.mdc) and [data-access.mdc](mdc:.cursor/rules/data-access.mdc)?
+5. Is the pricing/upgrade UI rendered via `<PricingTable />` rather than hand-rolled?

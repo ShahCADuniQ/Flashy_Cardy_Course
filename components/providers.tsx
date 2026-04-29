@@ -8,6 +8,7 @@ import {
   useTheme,
   type ThemeProviderProps,
 } from "next-themes"
+import { TooltipProvider } from "@/components/ui/tooltip"
 
 function ClerkProviderWithTheme({
   children,
@@ -33,7 +34,9 @@ export function Providers({
 }: ThemeProviderProps) {
   return (
     <NextThemesProvider {...props}>
-      <ClerkProviderWithTheme>{children}</ClerkProviderWithTheme>
+      <ClerkProviderWithTheme>
+        <TooltipProvider>{children}</TooltipProvider>
+      </ClerkProviderWithTheme>
     </NextThemesProvider>
   )
 }

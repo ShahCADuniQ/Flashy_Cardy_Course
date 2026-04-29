@@ -1,0 +1,129 @@
+---
+description: Calling OpenAI / LLM features (e.g. AI flashcard generation) via the Vercel AI SDK
+alwaysApply: false
+---
+# AI Features with the Vercel AI SDK
+
+All LLM / OpenAI calls in this project go through the [Vercel AI SDK](https://ai-sdk.dev) (`ai` npm package). The only AI feature in the app today is **AI flashcard generation**, which is gated by the Clerk feature `ai_flash_card_generation` (see [clerk-billing.mdc](mdc:.cursor/rules/clerk-billing.mdc)).
+
+Do not call the OpenAI REST API directly, do not use the `openai` npm package, do not use `fetch` against `api.openai.com`, and do not introduce other LLM clients. The Vercel AI SDK is the single source of truth for model calls.
+
+## Rules
+
+- Use the `ai` package's helpers (`generateText`, `generateObject`, `streamText`, etc.) for all model calls. For flashcard generation, prefer **structured output** so the result is a typed, validated object rather than free-form text.
+- Always specify the model as the string `"openai/gpt-5.3-chat"` unless explicitly told otherwise. Do not invent or substitute model slugs.
+- Always describe the expected output with a [Zod](https://zod.dev) schema and pass it via `Output.object({ schema })` (when using `generateText`) or via the `schema` option (when using `generateObject`). Never parse free-form model text by hand.
+- The Zod schema is the contract between the model and the app — derive your TypeScript types from it with `z.infer` and treat the validated `output` as the only trustworthy shape.
+- All LLM calls MUST happen inside a **Server Action** (per [data-access.mdc](mdc:.cursor/rules/data-access.mdc)) — never from a Client Component, never from a Route Handler created just to proxy the model. The OpenAI API key must stay on the server.
+- Before any model call in a user-triggered Server Action:
+  1. Derive `userId` and `has` from `await auth()` per [clerk-auth.mdc](mdc:.cursor/rules/clerk-auth.mdc).
+  2. Reject unauthenticated callers (`if (!userId) throw new Error("Unauthorized")`).
+  3. Enforce the `ai_flash_card_generation` entitlement with `has({ feature: "ai_flash_card_generation" })` per [clerk-billing.mdc](mdc:.cursor/rules/clerk-billing.mdc).
+  4. Validate the action's input with a Zod schema per [data-access.mdc](mdc:.cursor/rules/data-access.mdc).
+- Persist any generated cards through the Drizzle client per [drizzle-database.mdc](mdc:.cursor/rules/drizzle-database.mdc), scoping writes by the authenticated `userId` and verifying parent-deck ownership before inserting into `cardsTable`.
+- Read the OpenAI API key from `process.env` on the server only. Never expose it to the client (no `NEXT_PUBLIC_*` prefix), never log it, never embed it in props passed to Client Components.
+
+## Structured-output pattern
+
+The reference pattern for any structured generation in this app (taken from the Vercel AI SDK docs):
+
+```ts
+import { generateText, Output } from "ai";
+import { z } from "zod";
+
+const { output } = await generateText({
+  model: "openai/gpt-5.3-chat",
+  output: Output.object({
+    schema: z.object({
+      recipe: z.object({
+        name: z.string(),
+        ingredients: z.array(
+          z.object({ name: z.string(), amount: z.string() }),
+        ),
+        steps: z.array(z.string()),
+      }),
+    }),
+  }),
+  prompt: "Generate a lasagna recipe.",
+});
+```
+
+Apply the same shape for flashcard generation: define a Zod schema describing the cards, pass it via `Output.object`, and use the returned `output` directly.
+
+## Required shape for the AI flashcard Server Action
+
+```ts
+"use server";
+
+import { generateText, Output } from "ai";
+import { z } from "zod";
+import { auth } from "@clerk/nextjs/server";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/db";
+import { cardsTable, decksTable } from "@/db/schema";
+
+const generateCardsInputSchema = z.object({
+  deckId: z.number().int().positive(),
+  topic: z.string().min(1).max(500),
+  count: z.number().int().min(1).max(20),
+});
+
+type GenerateCardsInput = z.infer<typeof generateCardsInputSchema>;
+
+const cardsOutputSchema = z.object({
+  cards: z.array(
+    z.object({
+      front: z.string().min(1),
+      back: z.string().min(1),
+    }),
+  ),
+});
+
+export async function generateCardsWithAi(input: GenerateCardsInput) {
+  const { userId, has } = await auth();
+  if (!userId) throw new Error("Unauthorized");
+
+  if (!has({ feature: "ai_flash_card_generation" })) {
+    throw new Error(
+      "Upgrade to Pro to generate flash cards with AI.",
+    );
+  }
+
+  const { deckId, topic, count } = generateCardsInputSchema.parse(input);
+
+  const deck = await db.query.decksTable.findFirst({
+    where: and(eq(decksTable.id, deckId), eq(decksTable.userId, userId)),
+  });
+  if (!deck) throw new Error("Not found");
+
+  const { output } = await generateText({
+    model: "openai/gpt-5.3-chat",
+    output: Output.object({ schema: cardsOutputSchema }),
+    prompt: `Generate ${count} flashcards about: ${topic}.`,
+  });
+
+  await db.insert(cardsTable).values(
+    output.cards.map((c) => ({
+      deckId,
+      front: c.front,
+      back: c.back,
+    })),
+  );
+}
+```
+
+Note that:
+
+- The model is `"openai/gpt-5.3-chat"` (do not substitute).
+- Output is described by a Zod schema and consumed as a typed object — no manual parsing of model text.
+- Auth, entitlement, input validation, and ownership are all enforced before the model is called.
+- Writes go through the Drizzle client and are scoped to the authenticated user's deck.
+
+## Review checklist before shipping any AI code
+
+1. Is the call going through the `ai` package (not raw `fetch` / `openai` SDK / a different provider)?
+2. Is the model exactly `"openai/gpt-5.3-chat"` (unless the user explicitly asked for something else)?
+3. Is the output described by a Zod schema via `Output.object({ schema })` (or `generateObject`'s `schema`) — and is the validated `output` the only thing the app consumes?
+4. Does the call live in a Server Action, with `userId` from `auth()`, the `ai_flash_card_generation` feature checked via `has()`, and the input validated by Zod?
+5. For flashcard inserts, is parent-deck ownership verified against `decksTable.userId` before writing to `cardsTable`?
+6. Is the OpenAI API key read only from server-side `process.env` and never leaked to the client?

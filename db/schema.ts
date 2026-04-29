@@ -1,4 +1,11 @@
-import { integer, pgTable, varchar, text, timestamp } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  integer,
+  pgTable,
+  varchar,
+  text,
+  timestamp,
+} from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
 export const decksTable = pgTable("decks", {
@@ -20,6 +27,22 @@ export const cardsTable = pgTable("cards", {
     .references(() => decksTable.id, { onDelete: "cascade" }),
   front: text().notNull(),
   back: text().notNull(),
+  aiGenerated: boolean().notNull().default(false),
+  createdAt: timestamp().notNull().defaultNow(),
+  updatedAt: timestamp()
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+});
+
+export const deckAttachmentsTable = pgTable("deck_attachments", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  deckId: integer()
+    .notNull()
+    .references(() => decksTable.id, { onDelete: "cascade" }),
+  filename: varchar({ length: 255 }).notNull(),
+  byteSize: integer().notNull(),
+  content: text().notNull(),
   createdAt: timestamp().notNull().defaultNow(),
   updatedAt: timestamp()
     .notNull()
@@ -29,6 +52,7 @@ export const cardsTable = pgTable("cards", {
 
 export const decksRelations = relations(decksTable, ({ many }) => ({
   cards: many(cardsTable),
+  attachments: many(deckAttachmentsTable),
 }));
 
 export const cardsRelations = relations(cardsTable, ({ one }) => ({
@@ -37,3 +61,13 @@ export const cardsRelations = relations(cardsTable, ({ one }) => ({
     references: [decksTable.id],
   }),
 }));
+
+export const deckAttachmentsRelations = relations(
+  deckAttachmentsTable,
+  ({ one }) => ({
+    deck: one(decksTable, {
+      fields: [deckAttachmentsTable.deckId],
+      references: [decksTable.id],
+    }),
+  }),
+);
